@@ -664,7 +664,8 @@ def release_kv_cache(req: Req, tree_cache: BasePrefixCache, is_insert: bool = Tr
 
     # StreamingSession.cache_finished_req handles speculative tail trim
     # internally, then sets req_pool_idx = None.
-    if req.req_pool_idx is None:
+    assert (req.req_pool_idx is None) == (req.kv is None)
+    if req.req_pool_idx is None and req.kv is None:
         return
 
     start_p, end_p = kv_committed_len, req.kv.kv_allocated_len
