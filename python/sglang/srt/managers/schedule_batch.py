@@ -84,14 +84,16 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     zero_match_result,
 )
 from sglang.srt.mem_cache.common import (
-    alloc_for_decode,
-    alloc_for_extend,
     evict_from_tree_cache,
     free_swa_out_of_window_slots,
-    get_alloc_reserve_per_decode,
     release_kv_cache,
 )
+from sglang.srt.mem_cache.kv_allocation_sizing import get_alloc_reserve_per_decode
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
+from sglang.srt.mem_cache.owned_kv_allocation import (
+    alloc_for_decode,
+    alloc_for_extend,
+)
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,

@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
-from sglang.srt.mem_cache.common import (
+from sglang.srt.mem_cache.kv_allocation_sizing import get_alloc_reserve_per_decode
+from sglang.srt.mem_cache.owned_kv_allocation import (
     alloc_paged_token_slots_extend,
     alloc_token_slots,
-    get_alloc_reserve_per_decode,
     get_last_loc,
 )
 from sglang.srt.utils import is_cuda, is_hip, is_musa, is_npu
