@@ -1448,19 +1448,17 @@ class DFlashWorkerV2(BaseSpecWorker):
             # Backend planning only needs a safe upper bound for the committed
             # prefix lengths, not the full allocator reservation length.
             draft_seq_lens = prefix_lens
-            if draft_input.planning_seq_lens_cpu is not None:
-                seq_lens_cpu.copy_(draft_input.planning_seq_lens_cpu)
-                draft_seq_lens_sum = int(draft_input.planning_seq_lens_sum)
+            if model_worker_batch.seq_lens_cpu is not None:
+                # Host bound = resolved committed prefix (seq_lens_cpu, post-publish,
+                # consistent with GPU prefix_lens) + one verify block of headroom.
+                seq_lens_cpu.copy_(model_worker_batch.seq_lens_cpu)
+                seq_lens_cpu.add_(block_size)
+                draft_seq_lens_sum = int(seq_lens_cpu.sum())
             elif draft_input.reserved_seq_lens_cpu is not None:
+                # GPU-only backend (no host seq_lens published): the reserved
+                # allocator upper bound is a safe over-estimate.
                 seq_lens_cpu.copy_(draft_input.reserved_seq_lens_cpu)
                 draft_seq_lens_sum = int(draft_input.reserved_seq_lens_sum)
-            elif model_worker_batch.seq_lens_cpu is not None:
-                seq_lens_cpu.copy_(model_worker_batch.seq_lens_cpu)
-                draft_seq_lens_sum = (
-                    int(model_worker_batch.seq_lens_sum)
-                    if model_worker_batch.seq_lens_sum is not None
-                    else int(model_worker_batch.seq_lens_cpu.sum())
-                )
             else:
                 seq_lens_cpu.copy_(prefix_lens.to("cpu", dtype=torch.int32))
                 draft_seq_lens_sum = int(prefix_lens.sum().item())
@@ -1524,9 +1522,12 @@ class DFlashWorkerV2(BaseSpecWorker):
         )
         seq_lens_cpu_backup = model_worker_batch.seq_lens_cpu
         seq_lens_sum_backup = model_worker_batch.seq_lens_sum
-        if draft_input.planning_seq_lens_cpu is not None:
-            model_worker_batch.seq_lens_cpu = draft_input.planning_seq_lens_cpu
-            model_worker_batch.seq_lens_sum = int(draft_input.planning_seq_lens_sum)
+        if seq_lens_cpu_backup is not None:
+            # Verify host bound = published committed prefix + one verify block,
+            # derived from the resolved seq_lens_cpu (matches the draft path).
+            verify_host_seq_lens = seq_lens_cpu_backup + block_size
+            model_worker_batch.seq_lens_cpu = verify_host_seq_lens
+            model_worker_batch.seq_lens_sum = int(verify_host_seq_lens.sum())
         elif draft_input.reserved_seq_lens_cpu is not None:
             model_worker_batch.seq_lens_cpu = draft_input.reserved_seq_lens_cpu
             model_worker_batch.seq_lens_sum = int(draft_input.reserved_seq_lens_sum)

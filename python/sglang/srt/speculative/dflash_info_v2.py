@@ -51,11 +51,8 @@ class DFlashDraftInputV2(SpecInput):
     verify_done: Optional[torch.cuda.Event] = None
     max_top_k: int = 1
     uniform_top_k_value: Optional[int] = None
-    planning_seq_lens_cpu: Optional[torch.Tensor] = None
-    planning_seq_lens_sum: Optional[int] = None
     reserved_seq_lens_cpu: Optional[torch.Tensor] = None
     reserved_seq_lens_sum: Optional[int] = None
-    _prepare_planning_kv_lens_cpu_buf: Optional[torch.Tensor] = None
     _prepare_batch_seq_lens_cpu_buf: Optional[torch.Tensor] = None
     _prepare_cur_kv_lens_cpu_buf: Optional[torch.Tensor] = None
     _prepare_nxt_kv_lens_cpu_buf: Optional[torch.Tensor] = None
@@ -87,11 +84,8 @@ class DFlashDraftInputV2(SpecInput):
             current = 0 if buf is None else int(buf.numel())
             return max(bs, 32, current * 2 if current > 0 else 0)
 
-        if needs_cpu_alloc(self._prepare_planning_kv_lens_cpu_buf):
-            capacity = grown_capacity(self._prepare_planning_kv_lens_cpu_buf)
-            self._prepare_planning_kv_lens_cpu_buf = torch.empty(
-                (capacity,), dtype=torch.int32, device="cpu", pin_memory=pin_memory
-            )
+        if needs_cpu_alloc(self._prepare_cur_kv_lens_cpu_buf):
+            capacity = grown_capacity(self._prepare_cur_kv_lens_cpu_buf)
             self._prepare_batch_seq_lens_cpu_buf = torch.empty(
                 (capacity,), dtype=torch.int64, device="cpu"
             )
@@ -140,13 +134,11 @@ class DFlashDraftInputV2(SpecInput):
         if bs == 0:
             return
         self._ensure_prepare_length_buffers(bs, batch.device)
-        assert self._prepare_planning_kv_lens_cpu_buf is not None
         assert self._prepare_batch_seq_lens_cpu_buf is not None
         assert self._prepare_cur_kv_lens_cpu_buf is not None
         assert self._prepare_nxt_kv_lens_cpu_buf is not None
         assert self._prepare_cur_kv_lens_gpu_buf is not None
         assert self._prepare_nxt_kv_lens_gpu_buf is not None
-        planning_kv_lens_cpu_t = self._prepare_planning_kv_lens_cpu_buf[:bs]
         batch_seq_lens_cpu_t = self._prepare_batch_seq_lens_cpu_buf[:bs]
         cur_kv_lens_cpu_t = self._prepare_cur_kv_lens_cpu_buf[:bs]
 
@@ -159,7 +151,6 @@ class DFlashDraftInputV2(SpecInput):
         page_size = batch.token_to_kv_pool_allocator.page_size
         nxt_kv_lens_cpu_t = self._prepare_nxt_kv_lens_cpu_buf[:bs]
         committed_seq_lens_sum = 0
-        planning_seq_lens_sum = 0
         reserved_seq_lens_sum = 0
         num_needed_tokens = 0
         max_top_k = 1
@@ -170,17 +161,14 @@ class DFlashDraftInputV2(SpecInput):
             # Allocation watermark lives on the req object (this method writes it
             # back below), read directly like EAGLE -- no carried CPU tensor.
             cur_alloc_len = int(req.kv_allocated_len)
-            planning_len = committed_len + block_size
             reserved_len = max(cur_alloc_len, committed_len + 2 * block_size)
             top_k = int(req.sampling_params.top_k)
 
             batch_seq_lens_cpu_t[i] = committed_len
             cur_kv_lens_cpu_t[i] = cur_alloc_len
-            planning_kv_lens_cpu_t[i] = planning_len
             nxt_kv_lens_cpu_t[i] = reserved_len
 
             committed_seq_lens_sum += committed_len
-            planning_seq_lens_sum += planning_len
             reserved_seq_lens_sum += reserved_len
             num_needed_tokens += reserved_len - cur_alloc_len
 
@@ -255,21 +243,15 @@ class DFlashDraftInputV2(SpecInput):
         for i, req in enumerate(batch.reqs):
             req.kv_allocated_len = max(req.kv_allocated_len, int(nxt_kv_lens_cpu_t[i]))
 
-        # Preserve the lagging committed CPU view on the batch and carry the
-        # tighter host-side planning bound separately from the full reserved
-        # allocator upper bound. Overlap scheduling only drifts by at most one
-        # DFlash block on the committed prefix lengths.
+        # Seed batch.seq_lens_cpu with committed: non-overlap reads it directly;
+        # overlap's resolve overwrites it with the published value. The verify
+        # host bound is derived in the worker, so only reserved is carried here.
         batch.seq_lens_cpu = batch_seq_lens_cpu_t
         batch.seq_lens_sum = committed_seq_lens_sum
-        self.planning_seq_lens_cpu = planning_kv_lens_cpu_t
-        self.planning_seq_lens_sum = planning_seq_lens_sum
         self.reserved_seq_lens_cpu = nxt_kv_lens_cpu_t
         self.reserved_seq_lens_sum = reserved_seq_lens_sum
 
     def filter_batch(self, new_indices: torch.Tensor, has_been_filtered: bool = True):
-        if self.planning_seq_lens_cpu is not None:
-            self.planning_seq_lens_cpu = self.planning_seq_lens_cpu[new_indices.cpu()]
-            self.planning_seq_lens_sum = int(self.planning_seq_lens_cpu.sum().item())
         if self.reserved_seq_lens_cpu is not None:
             self.reserved_seq_lens_cpu = self.reserved_seq_lens_cpu[new_indices.cpu()]
             self.reserved_seq_lens_sum = int(self.reserved_seq_lens_cpu.sum().item())
@@ -285,16 +267,6 @@ class DFlashDraftInputV2(SpecInput):
         self.hidden_states = self.hidden_states[new_indices]
 
     def merge_batch(self, spec_info: "DFlashDraftInputV2"):
-        if self.planning_seq_lens_cpu is not None:
-            assert spec_info.planning_seq_lens_cpu is not None
-            self.planning_seq_lens_cpu = torch.cat(
-                [self.planning_seq_lens_cpu, spec_info.planning_seq_lens_cpu]
-            )
-            self.planning_seq_lens_sum = int(self.planning_seq_lens_cpu.sum().item())
-        elif spec_info.planning_seq_lens_cpu is not None:
-            self.planning_seq_lens_cpu = spec_info.planning_seq_lens_cpu
-            self.planning_seq_lens_sum = spec_info.planning_seq_lens_sum
-
         if self.reserved_seq_lens_cpu is not None:
             assert spec_info.reserved_seq_lens_cpu is not None
             self.reserved_seq_lens_cpu = torch.cat(
