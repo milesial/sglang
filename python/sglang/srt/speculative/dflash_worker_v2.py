@@ -1168,7 +1168,6 @@ class DFlashWorkerV2(BaseSpecWorker):
         bonus_tokens: torch.Tensor,
         seq_lens: torch.Tensor,
         verify_done: Optional[torch.cuda.Event] = None,
-        cur_allocated_seq_lens_cpu: Optional[torch.Tensor] = None,
     ) -> DFlashDraftInputV2:
         bs = int(seq_lens.numel())
         device = bonus_tokens.device
@@ -1179,7 +1178,6 @@ class DFlashWorkerV2(BaseSpecWorker):
             new_seq_lens=seq_lens.to(dtype=torch.int64),
             hidden_states=torch.empty((bs, 0), device=device, dtype=torch.float16),
             verify_done=verify_done,
-            cur_allocated_seq_lens_cpu=cur_allocated_seq_lens_cpu,
         )
 
     def _make_next_draft_input_decode(
@@ -1188,7 +1186,6 @@ class DFlashWorkerV2(BaseSpecWorker):
         bonus_tokens: torch.Tensor,
         new_seq_lens: torch.Tensor,
         verify_done: Optional[torch.cuda.Event] = None,
-        cur_allocated_seq_lens_cpu: Optional[torch.Tensor] = None,
     ) -> DFlashDraftInputV2:
         bs = int(new_seq_lens.numel())
         device = bonus_tokens.device
@@ -1199,7 +1196,6 @@ class DFlashWorkerV2(BaseSpecWorker):
             new_seq_lens=new_seq_lens.to(dtype=torch.int64),
             hidden_states=torch.empty((bs, 0), device=device, dtype=torch.float16),
             verify_done=verify_done,
-            cur_allocated_seq_lens_cpu=cur_allocated_seq_lens_cpu,
         )
 
     def forward_batch_generation(
@@ -1278,7 +1274,6 @@ class DFlashWorkerV2(BaseSpecWorker):
             batch_output.next_draft_input = self._make_next_draft_input_prefill(
                 bonus_tokens=next_token_ids,
                 seq_lens=model_worker_batch.seq_lens,
-                cur_allocated_seq_lens_cpu=model_worker_batch.seq_lens_cpu,
             )
             verify_done = torch.get_device_module(device).Event()
             verify_done.record()
@@ -1459,13 +1454,6 @@ class DFlashWorkerV2(BaseSpecWorker):
             elif draft_input.reserved_seq_lens_cpu is not None:
                 seq_lens_cpu.copy_(draft_input.reserved_seq_lens_cpu)
                 draft_seq_lens_sum = int(draft_input.reserved_seq_lens_sum)
-            elif draft_input.committed_seq_lens_cpu is not None:
-                # Committed prefix lengths now live on the draft input (the shared
-                # seq_lens_cpu is the current length, not the lagging committed one).
-                seq_lens_cpu.copy_(draft_input.committed_seq_lens_cpu)
-                draft_seq_lens_sum = int(
-                    draft_input.committed_seq_lens_cpu.sum().item()
-                )
             elif model_worker_batch.seq_lens_cpu is not None:
                 seq_lens_cpu.copy_(model_worker_batch.seq_lens_cpu)
                 draft_seq_lens_sum = (
@@ -1685,7 +1673,6 @@ class DFlashWorkerV2(BaseSpecWorker):
         next_draft_input = self._make_next_draft_input_decode(
             bonus_tokens=bonus,
             new_seq_lens=new_seq_lens,
-            cur_allocated_seq_lens_cpu=draft_input.reserved_seq_lens_cpu,
         )
         verify_done = torch.get_device_module(device).Event()
         verify_done.record()
