@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, ref
 
 from sglang.srt.configs import (
     BailingHybridConfig,
@@ -30,6 +30,10 @@ _linear_attn_registry_cache: WeakKeyDictionary[ModelConfig, Any] = WeakKeyDictio
 
 
 def _get_linear_attn_registry_result(model_config: ModelConfig) -> Any:
+    try:
+        ref(model_config)
+    except TypeError:
+        return get_linear_attn_config(model_config.hf_config)
     if model_config not in _linear_attn_registry_cache:
         _linear_attn_registry_cache[model_config] = get_linear_attn_config(
             model_config.hf_config
