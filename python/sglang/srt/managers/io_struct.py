@@ -2167,6 +2167,8 @@ _REQ_TYPES_WITH_OPAQUE_FIELDS: tuple[Type[msgspec.Struct], ...] = (
 
 
 def wrap_as_pickle(obj: object) -> object:
+    if obj is None:
+        return None
     if _USE_PICKLE_IPC:
         return obj
     return PickleWrapper(pickle.dumps(obj))
