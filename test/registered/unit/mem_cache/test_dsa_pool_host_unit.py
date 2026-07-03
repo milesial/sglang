@@ -27,6 +27,32 @@ class TestDSAOffloadSignatures(unittest.TestCase):
                 self.assertIn("mamba_indices", signature.parameters)
 
 
+class TestDSAIndexShareBufferMapping(unittest.TestCase):
+    def test_indexshare_layers_reuse_previous_physical_buffer(self):
+        physical_layer_ids, logical_to_physical = (
+            DSATokenToKVPool._build_index_k_buffer_layer_mapping(
+                layer_num=11,
+                start_layer=0,
+                index_k_buffer_layer_ids=[0, 1, 2, 6, 10],
+            )
+        )
+
+        self.assertEqual(physical_layer_ids, [0, 1, 2, 6, 10])
+        self.assertEqual(logical_to_physical, [0, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4])
+
+    def test_shard_starting_on_shared_layer_keeps_local_fallback(self):
+        physical_layer_ids, logical_to_physical = (
+            DSATokenToKVPool._build_index_k_buffer_layer_mapping(
+                layer_num=4,
+                start_layer=3,
+                index_k_buffer_layer_ids=[6],
+            )
+        )
+
+        self.assertEqual(physical_layer_ids, [3, 6])
+        self.assertEqual(logical_to_physical, [0, 0, 0, 1])
+
+
 class TestDSAHiCacheTransfer(unittest.TestCase):
     def setUp(self):
         if not torch.cuda.is_available():

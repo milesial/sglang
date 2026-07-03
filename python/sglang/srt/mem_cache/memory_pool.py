@@ -3022,6 +3022,7 @@ class DSATokenToKVPool(MLATokenToKVPool):
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
         index_buf_size: Optional[int] = None,
+        index_k_buffer_layer_ids: Optional[List[int]] = None,
     ):
         override_dim = (
             kv_cache_dim if kv_cache_dim != kv_lora_rank + qk_rope_head_dim else None
@@ -3048,6 +3049,14 @@ class DSATokenToKVPool(MLATokenToKVPool):
             index_buf_size = size
         # num head == 1 and head dim == 128 for index_k in DSA
         assert index_head_dim == 128
+        (
+            self.index_k_buffer_layer_ids,
+            self.index_k_logical_to_physical,
+        ) = self._build_index_k_buffer_layer_mapping(
+            layer_num=self.layer_num,
+            start_layer=self.start_layer,
+            index_k_buffer_layer_ids=index_k_buffer_layer_ids,
+        )
 
         if _is_hip:
             if aiter_can_use_preshuffle_paged_mqa():
@@ -3065,7 +3074,7 @@ class DSATokenToKVPool(MLATokenToKVPool):
             if self.custom_mem_pool
             else nullcontext()
         ):
-            self.index_k_with_scale_buffer = [
+            self._unique_index_k_with_scale_buffer = [
                 torch.zeros(
                     # Layout:
                     #     ref: test_attention.py :: kv_cache_cast_to_fp8
@@ -3083,13 +3092,57 @@ class DSATokenToKVPool(MLATokenToKVPool):
                     dtype=self.index_k_with_scale_buffer_dtype,
                     device=device,
                 )
-                for _ in range(layer_num)
+                for _ in self.index_k_buffer_layer_ids
             ]
+        self.index_k_with_scale_buffer = [
+            self._unique_index_k_with_scale_buffer[physical_layer_id]
+            for physical_layer_id in self.index_k_logical_to_physical
+        ]
         self._finalize_allocation_log(size)
+
+    @staticmethod
+    def _build_index_k_buffer_layer_mapping(
+        layer_num: int,
+        start_layer: int,
+        index_k_buffer_layer_ids: Optional[List[int]],
+    ) -> Tuple[List[int], List[int]]:
+        if layer_num == 0:
+            return [], []
+
+        local_start = start_layer
+        local_end = start_layer + layer_num
+        if index_k_buffer_layer_ids is None:
+            physical_layer_ids = list(range(local_start, local_end))
+        else:
+            physical_layer_ids = sorted(
+                {
+                    layer_id
+                    for layer_id in index_k_buffer_layer_ids
+                    if local_start <= layer_id < local_end
+                }
+            )
+            # A PP shard can begin on an IndexShare layer whose producer lives
+            # on the previous shard. Keep one local fallback buffer so logical
+            # layer accessors remain valid.
+            if not physical_layer_ids or physical_layer_ids[0] != local_start:
+                physical_layer_ids.insert(0, local_start)
+
+        layer_id_to_physical = {
+            layer_id: physical_id
+            for physical_id, layer_id in enumerate(physical_layer_ids)
+        }
+        logical_to_physical = []
+        current_physical_id = 0
+        for layer_id in range(local_start, local_end):
+            if layer_id in layer_id_to_physical:
+                current_physical_id = layer_id_to_physical[layer_id]
+            logical_to_physical.append(current_physical_id)
+        return physical_layer_ids, logical_to_physical
 
     def _clear_buffers(self):
         del self.kv_buffer
         del self.index_k_with_scale_buffer
+        del self._unique_index_k_with_scale_buffer
 
     def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):
         """Move latent KV and the DSA indexer cache (key + scale) in lockstep."""
@@ -3100,7 +3153,7 @@ class DSATokenToKVPool(MLATokenToKVPool):
 
         tgt_loc_flat = tgt_loc.view(-1).long()
         src_loc_flat = src_loc.view(-1).long()
-        for index_k in self.index_k_with_scale_buffer:
+        for index_k in self._unique_index_k_with_scale_buffer:
             index_k[tgt_loc_flat] = index_k[src_loc_flat]
 
     def get_index_k_with_scale_buffer(self, layer_id: int) -> torch.Tensor:
@@ -3237,7 +3290,7 @@ class DSATokenToKVPool(MLATokenToKVPool):
 
     def get_kv_size_bytes(self):
         kv_size_bytes = super().get_kv_size_bytes()
-        for index_k_cache in self.index_k_with_scale_buffer:
+        for index_k_cache in self._unique_index_k_with_scale_buffer:
             kv_size_bytes += get_tensor_size_bytes(index_k_cache)
         return kv_size_bytes
 

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from sglang.srt.configs.model_config import (
+    dsa_layer_skips_topk,
     get_dsa_index_head_dim,
     get_minimax_sparse_attention_config,
     get_minimax_sparse_disable_value_layer_ids,
@@ -348,6 +349,22 @@ class ModelRunnerKVCacheMixin:
                 "--chunked-prefill-size=-1, --disable-radix-cache, no context-parallel "
                 "attention, no HiSparse, and --kv-cache-dtype != fp4_e2m1."
             )
+
+    def _get_dsa_index_k_buffer_layer_ids(self: ModelRunner) -> Optional[list[int]]:
+        hf_config = self.model_config.hf_config
+        layer_num = self.end_layer - self.start_layer
+        if self.num_effective_layers != layer_num:
+            return None
+
+        layer_ids = range(self.start_layer, self.end_layer)
+        full_layer_ids = [
+            layer_id
+            for layer_id in layer_ids
+            if not dsa_layer_skips_topk(hf_config, layer_id)
+        ]
+        if len(full_layer_ids) == layer_num:
+            return None
+        return full_layer_ids
 
     def _init_unified_mamba_pools(self: ModelRunner, max_num_reqs: int):
         """Build the shared-KV-pool stack for a hybrid-Mamba model:
@@ -852,6 +869,9 @@ class ModelRunnerKVCacheMixin:
                 pool_kwargs["host_to_device_ratio"] = parse_hisparse_config(
                     self.server_args
                 ).host_to_device_ratio
+            index_k_buffer_layer_ids = self._get_dsa_index_k_buffer_layer_ids()
+            if index_k_buffer_layer_ids is not None:
+                pool_kwargs["index_k_buffer_layer_ids"] = index_k_buffer_layer_ids
             self.token_to_kv_pool = PoolCls(
                 self.max_total_num_tokens,
                 page_size=self.page_size,
