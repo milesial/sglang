@@ -80,6 +80,30 @@ MAMBA_CACHE_V2_ADDITIONAL_RATIO_NO_OVERLAP = 1
 logger = logging.getLogger(__name__)
 
 
+def _uses_raw_mla_kv_cache_layout_for_dsa(server_args, is_hip_backend: bool) -> bool:
+    attention_backends = (
+        server_args.attention_backend,
+        server_args.prefill_attention_backend,
+        server_args.decode_attention_backend,
+    )
+    if "trtllm_mla" in attention_backends:
+        return True
+
+    if (
+        server_args.dsa_prefill_backend == "trtllm"
+        or server_args.dsa_decode_backend == "trtllm"
+    ):
+        return True
+
+    if is_hip_backend and (
+        server_args.dsa_prefill_backend in ("tilelang", "aiter")
+        or server_args.dsa_decode_backend in ("tilelang", "aiter")
+    ):
+        return True
+
+    return False
+
+
 def _get_dsv4_compress_state_dtypes() -> tuple[torch.dtype, torch.dtype]:
     dtype_name = envs.SGLANG_DSV4_COMPRESS_STATE_DTYPE.get().strip().lower()
     if dtype_name in ("float32", "fp32"):
@@ -254,28 +278,18 @@ class ModelRunnerKVCacheMixin:
         if not is_dsa_model:
             return kv_cache_dim
 
-        # TRTLLM backend does not override kv_cache_dim for MLA kv cache
-        # Assuming dsa prefill and decode backends are the same when using trtllm MLA backend,
-        # since it is not compatible for trtllm and other mla attn backend due to the different
-        # kv cache layout.
-        if (
-            self.server_args.dsa_prefill_backend == "trtllm"
-            or self.server_args.dsa_decode_backend == "trtllm"
-        ):
-            return kv_cache_dim
-
-        # On HIP, TileLang and AITER DSA kernels consume the raw MLA KV layout:
+        # Some backends consume the raw MLA KV layout:
         # nope(512 fp8) + rope(64 fp8), without extra per-block scales.
-        if _is_hip and (
-            self.server_args.dsa_prefill_backend in ("tilelang", "aiter")
-            or self.server_args.dsa_decode_backend in ("tilelang", "aiter")
-        ):
+        # HiSparse may force the DSA indexer backend to flashmla_kv while the
+        # resolved attention backend remains trtllm_mla, so key this decision
+        # off both backend families.
+        if _uses_raw_mla_kv_cache_layout_for_dsa(self.server_args, _is_hip):
             return kv_cache_dim
 
         quant_block_size = DSATokenToKVPool.quant_block_size
         rope_storage_dtype = DSATokenToKVPool.rope_storage_dtype
         # Calculate override_kv_cache_dim for FP8 storage in backends that use scaled KV layout
-        # (excluding TRTLLM and HIP raw-layout kernels).
+        # (excluding raw-layout kernels).
         # kv_lora_rank + scale storage (kv_lora_rank // quant_block_size * 4 bytes) + rope dimension storage
         # Note: rope dimension is stored in original dtype (bf16), not quantized to fp8
         if kv_cache_dtype == torch.float8_e4m3fn:

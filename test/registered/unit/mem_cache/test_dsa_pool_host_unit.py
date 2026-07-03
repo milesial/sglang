@@ -1,8 +1,12 @@
 import inspect
 import unittest
+from types import SimpleNamespace
 
 import torch
 
+from sglang.srt.model_executor.model_runner_kv_cache_mixin import (
+    _uses_raw_mla_kv_cache_layout_for_dsa,
+)
 from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
 from sglang.srt.mem_cache.memory_pool_host import (
     DSAIndexerPoolHost,
@@ -51,6 +55,61 @@ class TestDSAIndexShareBufferMapping(unittest.TestCase):
 
         self.assertEqual(physical_layer_ids, [3, 6])
         self.assertEqual(logical_to_physical, [0, 0, 0, 1])
+
+
+class TestDSAMLAKVCacheLayoutSelection(unittest.TestCase):
+    @staticmethod
+    def _server_args(
+        *,
+        attention_backend="dsa",
+        prefill_attention_backend=None,
+        decode_attention_backend=None,
+        dsa_prefill_backend="flashmla_kv",
+        dsa_decode_backend="flashmla_kv",
+    ):
+        return SimpleNamespace(
+            attention_backend=attention_backend,
+            prefill_attention_backend=prefill_attention_backend,
+            decode_attention_backend=decode_attention_backend,
+            dsa_prefill_backend=dsa_prefill_backend,
+            dsa_decode_backend=dsa_decode_backend,
+        )
+
+    def test_trtllm_mla_attention_uses_raw_kv_layout(self):
+        server_args = self._server_args(
+            attention_backend="trtllm_mla",
+            dsa_prefill_backend="flashmla_kv",
+            dsa_decode_backend="flashmla_kv",
+        )
+
+        self.assertTrue(
+            _uses_raw_mla_kv_cache_layout_for_dsa(server_args, is_hip_backend=False)
+        )
+
+    def test_trtllm_dsa_backend_uses_raw_kv_layout(self):
+        server_args = self._server_args(
+            attention_backend="dsa",
+            dsa_prefill_backend="flashmla_kv",
+            dsa_decode_backend="trtllm",
+        )
+
+        self.assertTrue(
+            _uses_raw_mla_kv_cache_layout_for_dsa(server_args, is_hip_backend=False)
+        )
+
+    def test_flashmla_dsa_backend_uses_scaled_kv_layout_on_cuda(self):
+        server_args = self._server_args()
+
+        self.assertFalse(
+            _uses_raw_mla_kv_cache_layout_for_dsa(server_args, is_hip_backend=False)
+        )
+
+    def test_hip_tilelang_uses_raw_kv_layout(self):
+        server_args = self._server_args(dsa_prefill_backend="tilelang")
+
+        self.assertTrue(
+            _uses_raw_mla_kv_cache_layout_for_dsa(server_args, is_hip_backend=True)
+        )
 
 
 class TestDSAHiCacheTransfer(unittest.TestCase):
